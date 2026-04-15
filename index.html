@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#08080f;color:#e0e0e0;font-family:system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+#drop-zone{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;border:2px dashed #334;border-radius:12px;margin:24px;cursor:pointer;transition:border-color .2s}
+#drop-zone:hover{border-color:#5af}
+#drop-zone p{color:#888;font-size:13px;margin-top:8px}
+#viewer{display:none;flex-direction:column;height:100vh}
+#canvas-wrap{flex:1;position:relative;min-height:0}
+canvas{display:block;width:100%;height:100%}
+#hud{position:absolute;top:10px;left:10px;font-size:11px;color:#7af;background:rgba(0,0,0,.65);padding:8px 10px;border-radius:7px;line-height:1.9;pointer-events:none}
+#top-right{position:absolute;top:10px;right:10px}
+#controls{padding:10px 14px;background:#0d0d16;border-top:1px solid #1a1a2e;display:flex;flex-direction:column;gap:8px;flex-shrink:0}
+#btn-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+button{background:#1a1a2e;border:1px solid #334;color:#ccc;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px}
+button:hover{background:#252540}
+button.on{background:#1e3a5f;border-color:#5af;color:#5af}
+.cg{display:flex;align-items:center;gap:5px;font-size:12px;color:#888}
+.cg input[type=range]{width:65px;accent-color:#5af}
+.v{color:#5af;min-width:32px;font-size:12px}
+input[type=color]{width:26px;height:22px;border:1px solid #334;border-radius:4px;background:none;cursor:pointer;padding:1px}
+</style>
+</head>
+<body>
+<div id="drop-zone" onclick="document.getElementById('fi').click()">
+  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#5af" stroke-width="1.5">
+    <path d="M12 2v12m0 0-3-3m3 3 3-3"/><path d="M3 17v3a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1v-3"/>
+  </svg>
+  <h2 style="font-size:17px;font-weight:500;color:#aaa;margin-top:10px">Zebrafish DLC 3D Viewer</h2>
+  <p>Drop DeepLabCut CSV here, or click to browse</p>
+  <p style="color:#445;font-size:11px;margin-top:3px">Expects x_dp_Head, y_dp_Head … x_dp_Tail3, y_dp_Tail3, distance_from_bottom</p>
+  <p style="color:#445;font-size:11px;margin-top:2px">Optionally load a SimBA behavior CSV after loading DLC</p>
+</div>
+<input type="file" id="fi" accept=".csv" style="display:none">
+<input type="file" id="sfi" accept=".csv" style="display:none">
+
+<div id="viewer">
+  <div id="canvas-wrap">
+    <canvas id="c"></canvas>
+    <div id="hud">
+      <div id="h-frame">Frame: —</div>
+      <div id="h-time">Time: —</div>
+      <div id="h-xy">Head XY: —</div>
+      <div id="h-z">Depth: —</div>
+      <div id="h-beh" style="margin-top:4px;font-size:12px;font-weight:500;color:#fff;min-height:16px"></div>
+    </div>
+    <div id="top-right">
+      <button onclick="newFile()" style="font-size:11px;padding:5px 10px">⟳ New file</button>
+      <button onclick="document.getElementById('sfi').click()" style="font-size:11px;padding:5px 10px" id="simba-btn">+ SimBA CSV</button>
+      <span id="simba-label" style="font-size:11px;color:#5af;display:none"></span>
+    </div>
+  </div>
+  <div id="controls">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span style="font-size:12px;color:#888">Frame</span>
+      <input type="range" id="timeline" min="0" value="0" step="1" style="flex:1;accent-color:#5af">
+      <span id="prog" style="font-size:12px;color:#888">0 / 0</span>
+    </div>
+    <div id="btn-row">
+      <button id="bp" onclick="togglePlay()">▶ Play</button>
+      <div class="cg">Speed<input type="range" id="spd" min="0.1" max="20" step="0.1" value="1"><span class="v" id="sv">1.0×</span></div>
+      <div class="cg">Conf<input type="range" id="thr" min="0" max="1" step="0.05" value="0.3"><span class="v" id="tv">0.30</span></div>
+      <div class="cg">Trace<input type="color" id="tc" value="#00ffaa">
+        <button id="tbv" class="on" onclick="toggleTrace()">Show</button>
+        <button onclick="clearTrace()">Clear</button>
+      </div>
+      <button id="vt" class="on" onclick="setView('top')">Top</button>
+      <button id="v3" onclick="setView('3d')">3D</button>
+      <button id="vs" onclick="setView('side')">Side</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const FPS=30, TANK=800, H=TANK/2;
+const PNAMES=['Head','Trunk','Tail1','Tail2','Tail3'];
+// Elongation scale along fish axis, height, width — tapers toward tail
+const PSCALE=[{x:1.05,y:0.88,z:0.88},{x:1.7,y:1.0,z:0.96},{x:1.25,y:0.78,z:0.68},{x:1.0,y:0.52,z:0.44},{x:0.85,y:0.30,z:0.26}];
+const PRAD  =[11,11,9,7,5];
+
+let frames=[],sm=[],N=0,fi=0,playing=false,spd=1,thr=0.3;
+let lastT=null,acc=0,lastR=-1;
+let rng={};
+let traceShow=true,tracePts=[];
+// Pre-computed per-frame forward directions (smoothed, roll-locked)
+let fwdCache=[];
+
+let renderer,scene,topCam,sideCam,orbitCam,cam;
+let spheres=[],connLines=[],stripeMeshes=[],dorsalMesh,tailfinMesh,tLine;
+let oDrag=false,oLast={x:0,y:0},oTheta=0.7,oPhi=1.0,oR=TANK*1.6;
+
+// ── CSV ───────────────────────────────────────────────────────────────────────
+function parseCSV(txt){
+  const lines=txt.split('\n');
+  let hi=0;
+  for(let i=0;i<Math.min(15,lines.length);i++){if(lines[i].indexOf('x_dp_Head')>=0){hi=i;break;}}
+  const cols=lines[hi].split(',');
+  const need=['x_dp_Head','y_dp_Head','x_dp_Trunk','y_dp_Trunk',
+    'x_dp_Tail1','y_dp_Tail1','x_dp_Tail2','y_dp_Tail2','x_dp_Tail3','y_dp_Tail3',
+    'likelihood_Head','likelihood_Trunk','likelihood_Tail1','likelihood_Tail2','likelihood_Tail3',
+    'distance_from_bottom','z'];
+  const idx={};need.forEach(k=>{idx[k]=cols.indexOf(k);});
+  const out=[];
+  for(let i=hi+1;i<lines.length;i++){
+    const c=lines[i].split(',');if(c.length<5)continue;
+    const f={};need.forEach(k=>{f[k]=idx[k]>=0?parseFloat(c[idx[k]]):NaN;});
+    out.push(f);
+  }
+  return out;
+}
+
+// ── Calibrate ─────────────────────────────────────────────────────────────────
+function calibrate(raw){
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity,z0=Infinity,z1=-Infinity,hasZ=false;
+  raw.forEach(f=>{
+    PNAMES.forEach(nm=>{
+      const xv=f['x_dp_'+nm],yv=f['y_dp_'+nm];
+      if(isFinite(xv)){x0=Math.min(x0,xv);x1=Math.max(x1,xv);}
+      if(isFinite(yv)){y0=Math.min(y0,yv);y1=Math.max(y1,yv);}
+    });
+    const zv=isFinite(f.distance_from_bottom)?f.distance_from_bottom:f.z;
+    if(isFinite(zv)){z0=Math.min(z0,zv);z1=Math.max(z1,zv);hasZ=true;}
+  });
+  const span=Math.max(x1-x0,y1-y0)||1;
+  const cx=(x0+x1)/2,cy=(y0+y1)/2;
+  rng={x0:cx-span/2,x1:cx+span/2,y0:cy-span/2,y1:cy+span/2,span,z0,z1,zspan:(z1-z0)||1,hasZ};
+}
+
+function mx(v){return((v-rng.x0)/rng.span-0.5)*TANK;}
+function my(v){return-((v-rng.y0)/rng.span-0.5)*TANK;}
+function mz(v){return rng.hasZ?((v-rng.z0)/rng.zspan-0.5)*TANK:0;}
+function getZval(f){return isFinite(f.distance_from_bottom)?f.distance_from_bottom:f.z;}
+
+function getPt(f,nm){
+  const xv=f['x_dp_'+nm],yv=f['y_dp_'+nm];
+  const lk=f['likelihood_'+nm];
+  const ok=isFinite(xv)&&isFinite(yv)&&(isFinite(lk)?lk>=thr:true);
+  return{x:mx(xv),y:my(yv),z:mz(getZval(f)),ok};
+}
+
+// ── Gaussian smooth on raw data coords ───────────────────────────────────────
+function gaussSmooth(raw,W){
+  const n=raw.length,sig=Math.max(W/2,1);
+  const wts=[];for(let d=-W;d<=W;d++)wts.push(Math.exp(-d*d/(2*sig*sig)));
+  const keys=[];
+  PNAMES.forEach(nm=>{keys.push('x_dp_'+nm);keys.push('y_dp_'+nm);});
+  keys.push('distance_from_bottom');keys.push('z');
+  return raw.map((f,i)=>{
+    const sf={...f};
+    keys.forEach(k=>{
+      let sum=0,ws=0;
+      for(let d=-W;d<=W;d++){
+        const j=Math.max(0,Math.min(n-1,i+d));
+        const v=raw[j][k];
+        if(isFinite(v)){sum+=v*wts[d+W];ws+=wts[d+W];}
+      }
+      sf[k]=ws>0?sum/ws:f[k];
+    });
+    return sf;
+  });
+}
+
+// ── Pre-compute forward directions with heavy smoothing + roll lock ───────────
+// Strategy:
+// 1. For each frame compute a raw forward vector from head→trunk (XY plane only — fish are horizontal)
+// 2. Smooth those angles with a wide window so turns are gradual
+// 3. Never allow pitch (fish stays level in tank) — only yaw changes
+function buildFwdCache(smData){
+  const n=smData.length;
+  // Step 1: raw yaw angle per frame (in XY plane only, ignoring z)
+  const rawAngles=new Float32Array(n);
+  for(let i=0;i<n;i++){
+    const f=smData[i];
+    const hx=f['x_dp_Head'],hy=f['y_dp_Head'];
+    const tx=f['x_dp_Trunk'],ty=f['y_dp_Trunk'];
+    if(isFinite(hx)&&isFinite(tx)){
+      // dx,dy in data space; note y is flipped in scene so use raw for angle
+      const dx=hx-tx, dy=-(hy-ty); // flip y to match scene
+      rawAngles[i]=Math.atan2(dy,dx);
+    } else {
+      rawAngles[i]=i>0?rawAngles[i-1]:0;
+    }
+  }
+
+  // Step 2: unwrap angles to avoid wrapping discontinuities
+  const unwrapped=new Float32Array(n);
+  unwrapped[0]=rawAngles[0];
+  for(let i=1;i<n;i++){
+    let diff=rawAngles[i]-unwrapped[i-1];
+    // bring diff to [-pi, pi]
+    while(diff>Math.PI)diff-=2*Math.PI;
+    while(diff<-Math.PI)diff+=2*Math.PI;
+    unwrapped[i]=unwrapped[i-1]+diff;
+  }
+
+  // Step 3: smooth with wide gaussian (W=20 frames ≈ 0.67s at 30fps)
+  const W=20,sig=W/2;
+  const wts=[];for(let d=-W;d<=W;d++)wts.push(Math.exp(-d*d/(2*sig*sig)));
+  const smoothAngles=new Float32Array(n);
+  for(let i=0;i<n;i++){
+    let sum=0,ws=0;
+    for(let d=-W;d<=W;d++){
+      const j=Math.max(0,Math.min(n-1,i+d));
+      sum+=unwrapped[j]*wts[d+W];ws+=wts[d+W];
+    }
+    smoothAngles[i]=sum/ws;
+  }
+
+  // Step 4: build forward vectors — purely horizontal (y=0 in scene, fish stays level)
+  fwdCache=[];
+  for(let i=0;i<n;i++){
+    const a=smoothAngles[i];
+    fwdCache.push(new THREE.Vector3(Math.cos(a),0,Math.sin(a)));
+  }
+}
+
+// ── Scene ─────────────────────────────────────────────────────────────────────
+function initScene(){
+  const canvas=document.getElementById('c');
+  renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+  renderer.setClearColor(0x06080f);
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  scene=new THREE.Scene();
+  scene.add(new THREE.AmbientLight(0xffffff,0.5));
+  const dl=new THREE.DirectionalLight(0xaaddff,1.0);dl.position.set(300,500,400);scene.add(dl);
+  scene.add(new THREE.DirectionalLight(0x334466,0.4)).position.set(-200,-200,-300);
+
+  // Tank
+  scene.add(new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(TANK,TANK,TANK)),
+    new THREE.LineBasicMaterial({color:0x224466})));
+  const grid=new THREE.GridHelper(TANK,10,0x112233,0x112233);
+  grid.position.y=-H;scene.add(grid);
+  scene.add(new THREE.Mesh(new THREE.BoxGeometry(TANK,TANK,TANK),
+    new THREE.MeshBasicMaterial({color:0x001828,transparent:true,opacity:0.12,side:THREE.BackSide})));
+
+  // Fish body segments
+  const bodyMat=new THREE.MeshPhongMaterial({color:0xc2d8ea,emissive:0x0a1820,shininess:80});
+  spheres=PNAMES.map((_,i)=>{
+    const m=new THREE.Mesh(new THREE.SphereGeometry(PRAD[i],16,12),bodyMat.clone());
+    scene.add(m);return m;
+  });
+
+  // Zebra stripes: dark cylinders along trunk, axis along fish fwd
+  const stripeMat=new THREE.MeshPhongMaterial({color:0x0e151c,emissive:0x000000,shininess:10});
+  stripeMeshes=[];
+  for(let i=0;i<4;i++){
+    const m=new THREE.Mesh(new THREE.CylinderGeometry(11.5,11.5,3,16),stripeMat.clone());
+    scene.add(m);stripeMeshes.push(m);
+  }
+
+  // Dorsal fin
+  const finMat=new THREE.MeshPhongMaterial({color:0x90b8cc,transparent:true,opacity:0.4,side:THREE.DoubleSide});
+  dorsalMesh=new THREE.Mesh(new THREE.PlaneGeometry(44,13),finMat.clone());
+  scene.add(dorsalMesh);
+
+  // Tail fin
+  tailfinMesh=new THREE.Mesh(new THREE.PlaneGeometry(9,24),finMat.clone());
+  scene.add(tailfinMesh);
+
+  // Connectors
+  connLines=[];
+  for(let i=0;i<4;i++){
+    const geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3));
+    const ln=new THREE.Line(geo,new THREE.LineBasicMaterial({color:0x4499aa,transparent:true,opacity:0.7}));
+    scene.add(ln);connLines.push(ln);
+  }
+
+  // Trace
+  const tgeo=new THREE.BufferGeometry();
+  tgeo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(200000*3),3));
+  tgeo.setDrawRange(0,0);
+  tLine=new THREE.Line(tgeo,new THREE.LineBasicMaterial({color:0x00ffaa,transparent:true,opacity:0.6}));
+  scene.add(tLine);
+
+  // Cameras
+  const hh=H*0.9;
+  topCam=new THREE.OrthographicCamera(-hh,hh,hh,-hh,1,10000);
+  topCam.position.set(0,TANK*1.5,0);topCam.lookAt(0,0,0);
+  sideCam=new THREE.OrthographicCamera(-hh,hh,hh,-hh,1,10000);
+  sideCam.position.set(0,0,TANK*1.5);sideCam.lookAt(0,0,0);
+  orbitCam=new THREE.PerspectiveCamera(50,1,1,10000);
+  cam=topCam;
+  setupOrbit();resize();
+  window.addEventListener('resize',resize);
+  renderer.setAnimationLoop(loop);
+}
+
+// Reusable objects
+const _qYaw=new THREE.Quaternion();
+const _axisY=new THREE.Vector3(0,1,0);
+const _axisZ=new THREE.Vector3(0,0,1);
+const _localX=new THREE.Vector3(1,0,0);
+
+function renderFrame(idx){
+  const f=sm[idx];
+  const pts=PNAMES.map(nm=>getPt(f,nm));
+
+  // Forward direction: from pre-computed roll-locked cache
+  const fwd=fwdCache[idx]||new THREE.Vector3(1,0,0);
+
+  // Yaw-only quaternion: rotate local +X to fwd (which has y=0, so pure horizontal turn)
+  _qYaw.setFromUnitVectors(_localX,fwd);
+
+  // Place body segments
+  pts.forEach((p,i)=>{
+    spheres[i].visible=p.ok;
+    if(p.ok){
+      spheres[i].position.set(p.x,p.y,p.z);
+      spheres[i].quaternion.copy(_qYaw);
+      spheres[i].scale.set(PSCALE[i].x,PSCALE[i].y,PSCALE[i].z);
+    }
+  });
+
+  // Stripe rings: evenly spaced along trunk, perpendicular to fwd
+  const trunk=pts[1];
+  if(trunk.ok){
+    // stripe axis perpendicular to fwd → rotate cylinder (local Y axis) to fwd
+    const qStripe=new THREE.Quaternion().setFromUnitVectors(_axisY,fwd);
+    const offsets=[-15,-5,5,15];
+    stripeMeshes.forEach((sm2,i)=>{
+      sm2.position.set(trunk.x+fwd.x*offsets[i],trunk.y,trunk.z+fwd.z*offsets[i]);
+      sm2.quaternion.copy(qStripe);
+      sm2.visible=true;
+    });
+  }else stripeMeshes.forEach(m=>m.visible=false);
+
+  // Dorsal fin: above trunk, oriented along fish body (flat horizontal plane tilted up)
+  if(trunk.ok){
+    dorsalMesh.position.set(trunk.x,trunk.y+10,trunk.z);
+    // plane normal is local Z; rotate so it lies along fwd in XZ, standing upright
+    const qDorsal=new THREE.Quaternion().setFromUnitVectors(_axisZ,_axisY);
+    qDorsal.premultiply(_qYaw);
+    dorsalMesh.quaternion.copy(qDorsal);
+    dorsalMesh.visible=true;
+  }else dorsalMesh.visible=false;
+
+  // Tail fin: at tail tip, vertical plane perpendicular to fish axis
+  const tail=pts[4];
+  if(tail.ok){
+    tailfinMesh.position.set(tail.x,tail.y,tail.z);
+    // plane perpendicular to fwd → normal points along fwd
+    const qTail=new THREE.Quaternion().setFromUnitVectors(_axisZ,fwd);
+    tailfinMesh.quaternion.copy(qTail);
+    tailfinMesh.visible=true;
+  }else tailfinMesh.visible=false;
+
+  // Connectors
+  for(let i=0;i<4;i++){
+    const a=pts[i],b=pts[i+1];
+    if(a.ok&&b.ok){
+      connLines[i].visible=true;
+      const ar=connLines[i].geometry.attributes.position.array;
+      ar[0]=a.x;ar[1]=a.y;ar[2]=a.z;ar[3]=b.x;ar[4]=b.y;ar[5]=b.z;
+      connLines[i].geometry.attributes.position.needsUpdate=true;
+    }else connLines[i].visible=false;
+  }
+
+  // Trace
+  const ref=pts[1].ok?pts[1]:(pts[0].ok?pts[0]:null);
+  if(ref&&idx>=tracePts.length){
+    tracePts.push([ref.x,ref.y,ref.z]);
+    const arr=tLine.geometry.attributes.position.array;
+    const n=tracePts.length-1;
+    arr[n*3]=ref.x;arr[n*3+1]=ref.y;arr[n*3+2]=ref.z;
+    tLine.geometry.attributes.position.needsUpdate=true;
+  }
+  tLine.geometry.setDrawRange(0,Math.min(idx+1,tracePts.length));
+
+  // HUD
+  const hp=pts[0];
+  document.getElementById('h-frame').textContent='Frame: '+idx;
+  document.getElementById('h-time').textContent='Time: '+(idx/FPS).toFixed(2)+'s / '+(N/FPS).toFixed(1)+'s';
+  document.getElementById('h-xy').textContent=hp.ok?`Head: (${hp.x.toFixed(0)}, ${hp.y.toFixed(0)})`:'Head: low conf';
+  document.getElementById('h-z').textContent=rng.hasZ?`Depth: ${mz(getZval(f)).toFixed(0)}`:'Depth: no data';
+}
+
+// Pan for all cameras
+let panX=0,panY=0,panZ=0;
+let topPanX=0,topPanY=0,sidePanX=0,sidePanY=0;
+let isPanning=false,panLast={x:0,y:0};
+
+function loop(){
+  if(cam===orbitCam){
+    orbitCam.position.set(
+      panX+oR*Math.sin(oPhi)*Math.sin(oTheta),
+      panY+oR*Math.cos(oPhi),
+      panZ+oR*Math.sin(oPhi)*Math.cos(oTheta));
+    orbitCam.lookAt(panX,panY,panZ);
+  }
+  if(playing&&N>0){
+    const now=performance.now();
+    if(lastT!==null){acc+=(now-lastT)*spd;const fs=1000/FPS;while(acc>=fs){fi=(fi+1)%N;acc-=fs;}}
+    lastT=now;
+    document.getElementById('timeline').value=fi;
+    document.getElementById('prog').textContent=fi+' / '+N;
+  }
+  if(fi!==lastR){renderFrame(fi);lastR=fi;}
+  renderer.render(scene,cam);
+}
+
+function setupOrbit(){
+  const cv=document.getElementById('c');
+  cv.addEventListener('mousedown',e=>{
+    if(cam!==orbitCam)return;
+    oDrag=e.button===2?'pan':'orbit';
+    oLast={x:e.clientX,y:e.clientY};
+  });
+  cv.addEventListener('contextmenu',e=>e.preventDefault());
+  window.addEventListener('mouseup',()=>oDrag=false);
+  window.addEventListener('mousemove',e=>{
+    if(!oDrag)return;
+    const dx=e.clientX-oLast.x, dy=e.clientY-oLast.y;
+    if(oDrag==='orbit'){
+      oTheta-=dx*0.005;
+      oPhi=Math.max(0.08,Math.min(Math.PI-0.08,oPhi+dy*0.005));
+    } else {
+      // pan in camera-right and camera-up directions
+      const panSpeed=oR*0.001;
+      // camera right vector = rotate (1,0,0) by yaw (oTheta)
+      const rX= Math.cos(oTheta), rZ=-Math.sin(oTheta);
+      // camera up in world space (approximate — project out the fwd component)
+      const uX=-Math.sin(oPhi)*Math.sin(oTheta)*Math.cos(oPhi);
+      const uY= Math.sin(oPhi)*Math.sin(oPhi)+Math.cos(oPhi)*Math.cos(oPhi);
+      const uZ=-Math.sin(oPhi)*Math.cos(oTheta)*Math.cos(oPhi);
+      panX-=dx*panSpeed*rX;
+      panZ+=dx*panSpeed*rZ;
+      panY-=dy*panSpeed;
+    }
+    oLast={x:e.clientX,y:e.clientY};
+  });
+  cv.addEventListener('wheel',e=>{if(cam===orbitCam)oR=Math.max(200,oR+e.deltaY*0.8);},{passive:true});
+}
+
+function resize(){
+  const wrap=document.getElementById('canvas-wrap');
+  const w=wrap.clientWidth,h=wrap.clientHeight||500;
+  renderer.setSize(w,h,false);
+  orbitCam.aspect=w/h;orbitCam.updateProjectionMatrix();
+  const a=w/h,hh=H*0.9;
+  [topCam,sideCam].forEach(c=>{c.left=-hh*a;c.right=hh*a;c.top=hh;c.bottom=-hh;c.updateProjectionMatrix();});
+}
+
+function loadFile(file){
+  const rd=new FileReader();
+  rd.onload=e=>{
+    frames=parseCSV(e.target.result);
+    sm=gaussSmooth(frames,4);   // position smoothing: 4-frame window
+    N=frames.length;
+    calibrate(frames);
+    buildFwdCache(sm);           // orientation smoothing: 20-frame window, yaw-only
+    tracePts=[];fi=0;lastR=-1;lastT=null;acc=0;playing=false;
+    document.getElementById('bp').textContent='▶ Play';
+    document.getElementById('timeline').max=N-1;
+    document.getElementById('timeline').value=0;
+    document.getElementById('prog').textContent='0 / '+N;
+    document.getElementById('drop-zone').style.display='none';
+    document.getElementById('viewer').style.display='flex';
+    if(!renderer)initScene();else resetTrace();
+  };
+  rd.readAsText(file);
+}
+
+function resetTrace(){
+  tracePts=[];
+  const arr=tLine.geometry.attributes.position.array;
+  arr.fill(0);tLine.geometry.attributes.position.needsUpdate=true;
+  tLine.geometry.setDrawRange(0,0);
+}
+
+function togglePlay(){playing=!playing;lastT=null;acc=0;document.getElementById('bp').textContent=playing?'⏸ Pause':'▶ Play';}
+function newFile(){playing=false;document.getElementById('bp').textContent='▶ Play';document.getElementById('viewer').style.display='none';document.getElementById('drop-zone').style.display='flex';document.getElementById('fi').value='';}
+function toggleTrace(){traceShow=!traceShow;tLine.visible=traceShow;const b=document.getElementById('tbv');b.textContent=traceShow?'Show':'Hide';b.classList.toggle('on',traceShow);}
+function clearTrace(){if(renderer)resetTrace();}
+function setView(v){
+  cam=v==='top'?topCam:v==='side'?sideCam:orbitCam;
+  // reset pan so top/side are always centered
+  if(v!=='3d'){panX=0;panY=0;panZ=0;}
+  ['vt','v3','vs'].forEach(id=>document.getElementById(id).classList.remove('on'));
+  document.getElementById(v==='top'?'vt':v==='3d'?'v3':'vs').classList.add('on');
+  resize();
+}
+
+document.getElementById('fi').addEventListener('change',e=>{if(e.target.files[0])loadFile(e.target.files[0]);});
+const dz=document.getElementById('drop-zone');
+dz.addEventListener('dragover',e=>{e.preventDefault();dz.style.borderColor='#5af';});
+dz.addEventListener('dragleave',()=>dz.style.borderColor='');
+dz.addEventListener('drop',e=>{e.preventDefault();dz.style.borderColor='';const f=e.dataTransfer.files[0];if(f)loadFile(f);});
+document.getElementById('timeline').addEventListener('input',e=>{fi=parseInt(e.target.value);document.getElementById('prog').textContent=fi+' / '+N;});
+document.getElementById('spd').addEventListener('input',e=>{spd=parseFloat(e.target.value);document.getElementById('sv').textContent=spd.toFixed(1)+'×';});
+document.getElementById('thr').addEventListener('input',e=>{thr=parseFloat(e.target.value);document.getElementById('tv').textContent=thr.toFixed(2);});
+document.getElementById('tc').addEventListener('input',e=>{if(tLine)tLine.material.color.set(e.target.value);});
+</script>
+</body>
+</html>
